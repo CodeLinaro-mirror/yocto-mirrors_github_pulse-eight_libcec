@@ -355,7 +355,10 @@ impl ConnectionBuilder {
         self
     }
 
-    /// Open the first adapter libCEC finds.
+    /// Open the first adapter that can be opened.
+    ///
+    /// Adapters that another process is already using are skipped, so this
+    /// still finds the free one on a machine with several.
     pub fn open_first(self) -> Result<Connection> {
         self.open(None, DEFAULT_OPEN_TIMEOUT)
     }
@@ -363,9 +366,9 @@ impl ConnectionBuilder {
     /// Open a specific port - `/dev/ttyACM0`, `COM3`, or the
     /// [`port`](AdapterDescriptor::port) from [`Connection::detect_adapters`].
     ///
-    /// Pass `None` to detect and open the first adapter, which is what
-    /// [`open_first`](Self::open_first) does. Fails with [`Error::NoAdapter`]
-    /// when there is nothing to open.
+    /// Pass `None` to open the first adapter that can be opened, which is what
+    /// [`open_first`](Self::open_first) does. The timeout covers the call as a
+    /// whole, however many adapters have to be tried.
     pub fn open(mut self, port: Option<&str>, timeout: Duration) -> Result<Connection> {
         set_device_name(&mut self.config, &self.device_name)?;
 
@@ -422,52 +425,34 @@ impl ConnectionBuilder {
         // SAFETY: handle is live.
         unsafe { ffi::libcec_init_video_standalone(handle) };
 
-        // libcec_open will not pick an adapter for us: CLibCEC::Open returns
-        // false immediately on a null port. "The first adapter" therefore means
-        // detecting one and opening it by name, which is what cec-client does
-        // too. Detection runs on this connection rather than a throwaway one,
-        // since an initialised-but-unopened connection is all it needs.
-        let port = match port {
-            Some(port) => port.to_owned(),
-            None => first_adapter_port(handle)?,
+        // A null port asks libCEC to open the first adapter it can, walking past
+        // any that another process holds. Doing the detection here instead would
+        // only be able to try one of them.
+        let port_c = match port {
+            Some(port) => Some(CString::new(port).map_err(|_| Error::InvalidString {
+                field: "port",
+                reason: "contains an interior NUL byte",
+            })?),
+            None => None,
         };
-
-        let port_c = CString::new(port.as_str()).map_err(|_| Error::InvalidString {
-            field: "port",
-            reason: "contains an interior NUL byte",
-        })?;
         let timeout_ms = timeout.as_millis().min(u32::MAX as u128) as u32;
 
-        // SAFETY: handle is live; port_c is a valid C string that outlives the
-        // call.
-        if !from_c_bool(unsafe { ffi::libcec_open(handle, port_c.as_ptr(), timeout_ms) }) {
+        // SAFETY: handle is live; port_c, when there is one, is a valid C string
+        // that outlives the call.
+        let opened = from_c_bool(unsafe {
+            ffi::libcec_open(
+                handle,
+                port_c.as_ref().map_or(ptr::null(), |port| port.as_ptr()),
+                timeout_ms,
+            )
+        });
+        if !opened {
             // `inner` drops here, which closes and destroys the connection.
-            return Err(Error::Open(Some(port)));
+            return Err(Error::Open(port.map(str::to_owned)));
         }
 
         Ok(Connection { inner })
     }
-}
-
-/// The port of the first adapter an already-initialised connection can see.
-fn first_adapter_port(handle: ffi::libcec_connection_t) -> Result<String> {
-    let mut list = [ffi::cec_adapter_descriptor::default(); MAX_ADAPTERS];
-    // SAFETY: handle is live and the buffer is MAX_ADAPTERS long, which is the
-    // count passed. Quick scan: the port name is all that is wanted here, and
-    // probing each adapter for firmware details would only slow the open down.
-    let found = unsafe {
-        ffi::libcec_detect_adapters(
-            handle,
-            list.as_mut_ptr(),
-            MAX_ADAPTERS as u8,
-            ptr::null(),
-            as_c_bool(true),
-        )
-    };
-    if found <= 0 {
-        return Err(Error::NoAdapter);
-    }
-    Ok(read_fixed(&list[0].strComName))
 }
 
 // ---------------------------------------------------------------------------

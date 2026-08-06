@@ -50,12 +50,10 @@ pub enum Error {
     /// The adapter would not open.
     ///
     /// Carries the port that was tried, or `None` when libCEC was left to pick
-    /// one. The usual causes are no adapter attached, the port being held by
-    /// another process, or - on Linux - no permission on the device node.
+    /// one - in which case no adapter it detected could be opened. The usual
+    /// causes are no adapter attached, the port being held by another process,
+    /// or - on Linux - no permission on the device node.
     Open(Option<String>),
-
-    /// No adapter was detected, so there was nothing to open.
-    NoAdapter,
 
     /// A call failed. The operation is named because libCEC does not say more.
     Call(&'static str),
@@ -82,7 +80,6 @@ impl fmt::Display for Error {
             Error::Initialise => f.write_str("libCEC would not accept this configuration"),
             Error::Open(Some(port)) => write!(f, "could not open the CEC adapter on {port}"),
             Error::Open(None) => f.write_str("could not open a CEC adapter"),
-            Error::NoAdapter => f.write_str("no CEC adapter was detected"),
             Error::Call(what) => write!(f, "libCEC refused to {what}"),
             Error::Closed => f.write_str("the connection is closed"),
             Error::InvalidString { field, reason } => write!(f, "{field}: {reason}"),

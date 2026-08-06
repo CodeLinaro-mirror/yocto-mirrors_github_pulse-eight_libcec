@@ -40,7 +40,7 @@
 //! television over to this machine.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use libcec::callbacks::channel;
@@ -247,22 +247,32 @@ fn errors_say_which_call_failed() {
 // hardware - skipped when no adapter is attached
 // ---------------------------------------------------------------------------
 
+/// An adapter can only be open once, and cargo runs the tests in one binary on
+/// several threads, so the hardware tests have to take turns.
+static ADAPTER: Mutex<()> = Mutex::new(());
+
 /// Skip the body when there is no adapter, so this suite is honest on a build
-/// machine and still exercises the real thing on a bench.
+/// machine and still exercises the real thing on a bench. Yields the adapters
+/// and the turn-taking guard, which has to stay alive for the whole test.
 macro_rules! require_adapter {
     () => {{
+        // A test that panicked while holding the lock poisoned it without
+        // leaving anything behind - it dropped its connections on the way out.
+        let guard = ADAPTER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let adapters = Connection::detect_adapters(true).expect("adapter detection works");
         if adapters.is_empty() {
             eprintln!("no CEC adapter attached - skipping");
             return;
         }
-        adapters
+        (adapters, guard)
     }};
 }
 
 #[test]
 fn detect_adapters_describes_what_it_finds() {
-    let adapters = require_adapter!();
+    let (adapters, _guard) = require_adapter!();
     for adapter in &adapters {
         println!("{adapter}");
         assert!(!adapter.port.is_empty(), "an adapter needs a port to open");
@@ -276,7 +286,7 @@ fn detect_adapters_describes_what_it_finds() {
 
 #[test]
 fn open_query_and_drop() {
-    let adapters = require_adapter!();
+    let (adapters, _guard) = require_adapter!();
     let port = adapters[0].port.clone();
 
     let (handler, events) = channel();
@@ -320,8 +330,38 @@ fn open_query_and_drop() {
 }
 
 #[test]
+fn an_adapter_in_use_is_skipped_rather_than_fought_over() {
+    let (adapters, _guard) = require_adapter!();
+
+    // Hold every adapter this machine has, leaving the open below nothing it can
+    // pick. Whichever process opens an adapter first owns the port until it lets
+    // go, on Windows and on Linux alike.
+    let held: Vec<_> = adapters
+        .iter()
+        .filter_map(|adapter| {
+            ConnectionBuilder::new("RustCEC")
+                .activate_source(false)
+                .open(Some(&adapter.port), Duration::from_secs(10))
+                .ok()
+        })
+        .collect();
+    assert!(!held.is_empty(), "a detected adapter should open");
+
+    // Every adapter is tried before this gives up, and the error names no port
+    // because libCEC was the one choosing.
+    match ConnectionBuilder::new("RustCEC")
+        .activate_source(false)
+        .open(None, Duration::from_secs(5))
+    {
+        Err(Error::Open(None)) => {}
+        Err(other) => panic!("unexpected error: {other}"),
+        Ok(_) => panic!("an adapter that is in use should not open a second time"),
+    }
+}
+
+#[test]
 fn trait_callbacks_are_called_on_libcecs_thread() {
-    let _ = require_adapter!();
+    let (_adapters, _guard) = require_adapter!();
 
     #[derive(Default)]
     struct Counter {

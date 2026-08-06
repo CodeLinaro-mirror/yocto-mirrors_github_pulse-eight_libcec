@@ -50,16 +50,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for adapter in &adapters {
         println!("found {adapter}");
     }
-    let port = adapters[0].port.clone();
 
-    println!("opening {port} ...");
+    // Whichever of those opens - open() with a port picks a specific one.
+    println!("opening ...");
     let (handler, events) = channel();
     let cec = ConnectionBuilder::new("RustCEC")
         .device_type(DeviceType::RecordingDevice)
         // Leave the television's input where the user left it.
         .activate_source(false)
         .callbacks(handler)
-        .open(Some(&port), Duration::from_secs(10))?;
+        .open(None, Duration::from_secs(10))?;
 
     println!("{}", cec.lib_info());
 
